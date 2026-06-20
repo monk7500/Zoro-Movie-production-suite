@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+venv/
+ai-studio/
+.env
+
+# Models & large assets
+models/
+checkpoints/
+*.safetensors
+*.ckpt
+*.gguf
+*.bin
+*.pt
+*.pth
+
+# Cache & runtime
+cache/
+film_bible/
+*.log
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+
+# Output folders
+master/
+renders/
+graded/
+vfx/
+lipsync/
+animation/
+physics/
+environment_fx/
+population/
+voice_audio/
+foley/
+ambience/
+score/
+storyboard/
+character_visuals/
