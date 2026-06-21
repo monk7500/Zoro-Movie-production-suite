@@ -17,12 +17,21 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
 
     if not scenes:
         empty = {"scenes": {}}
-        return {"environment_timeline.json": json.dumps(empty, indent=2).encode("utf-8")}
+        output_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+        empty["_meta"] = {
+            "agent": "EnvironmentStateAgent",
+            "bible_version": bible_version,
+            "content_hash": content_hash,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        final_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        return {"environment_timeline.json": final_json.encode("utf-8")}
 
-    # 1. Build compact scene list for the LLM
+    # ---- 1. Build compact scene list for the LLM ----
     scene_list = _build_scene_list(scenes)
 
-    # 2. LLM‑based environment extraction
+    # ---- 2. LLM‑based environment extraction ----
     system_prompt = _build_system_prompt()
     user_prompt = f"Script:\n{scene_list}"
 
@@ -37,19 +46,25 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
     except Exception:
         env_data = _fallback_environment(scenes)
 
-    # 3. Validate and fill missing scenes
+    # ---- 3. Validate and fill missing scenes ----
     env_data = _validate_and_fill(env_data, scenes)
 
-    # 4. Add metadata
-    output_json = json.dumps(env_data, indent=2, ensure_ascii=False)
+    # ---- 4. Compute content hash WITHOUT _meta ----
+    clean_data = {k: v for k, v in env_data.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
+    # ---- 5. Add metadata ----
     env_data["_meta"] = {
         "agent": "EnvironmentStateAgent",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"environment_timeline.json": output_json.encode("utf-8")}
+    # ---- 6. Serialize final output WITH metadata ----
+    final_json = json.dumps(env_data, indent=2, ensure_ascii=False)
+    return {"environment_timeline.json": final_json.encode("utf-8")}
 
 
 # ---------------------------------------------------------------------------
