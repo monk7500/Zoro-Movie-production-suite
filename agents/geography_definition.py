@@ -16,7 +16,16 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
 
     if not location_profiles:
         empty = {"locations": {}}
-        return {"geography.json": json.dumps(empty, indent=2).encode("utf-8")}
+        output_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+        empty["_meta"] = {
+            "agent": "GeographyDefinitionAgent",
+            "bible_version": bible_version,
+            "content_hash": content_hash,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        final_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        return {"geography.json": final_json.encode("utf-8")}
 
     # 1. Group ALL props by their typical location
     props_by_location = _group_props_by_location(prop_catalog, location_profiles)
@@ -42,16 +51,21 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
     # 4. Validate and fill (ensures every hard‑fixed prop is placed)
     geo_data = _validate_and_fill(geo_data, location_profiles, props_by_location)
 
-    # 5. Add metadata
-    output_json = json.dumps(geo_data, indent=2, ensure_ascii=False)
+    # 5. Compute content hash WITHOUT _meta
+    clean_data = {k: v for k, v in geo_data.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
+    # 6. Add metadata
     geo_data["_meta"] = {
         "agent": "GeographyDefinitionAgent",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"geography.json": output_json.encode("utf-8")}
+    final_json = json.dumps(geo_data, indent=2, ensure_ascii=False)
+    return {"geography.json": final_json.encode("utf-8")}
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +101,6 @@ def _group_props_by_location(prop_catalog: dict, location_profiles: dict) -> dic
     for prop_name, prop_data in prop_catalog.items():
         loc = prop_data.get("location_typical", "")
         if loc not in props_by_loc:
-            # Try to infer from context
             loc = _infer_location(prop_name, prop_data, location_profiles)
             if not loc:
                 continue
@@ -181,7 +194,6 @@ def _validate_and_fill(geo_data: dict, location_profiles: dict, props_by_locatio
             loc_geo.setdefault("boundary", {"type": "rectangle", "width_m": 5.0, "depth_m": 5.0, "height_m": 2.5})
             loc_geo.setdefault("fixed_objects", [])
             loc_geo.setdefault("entrances", [{"id": "main_door", "position": {"x": 0.0, "y": 2.5, "z": 0.0}, "width": 1.0, "type": "door"}])
-            # Ensure every hard‑fixed prop from the catalog is present
             expected_hard = {p["name"] for p in props_by_location.get(loc_name, {}).get("hard_fixed", [])}
             placed_hard = {obj["id"] for obj in loc_geo["fixed_objects"]}
             for missing_name in expected_hard - placed_hard:
@@ -211,4 +223,4 @@ def _create_default_geography(loc_name: str, props_by_location: dict) -> dict:
         "boundary": {"type": "rectangle", "width_m": 5.0, "depth_m": 5.0, "height_m": 2.5},
         "fixed_objects": fixed_objects,
         "entrances": [{"id": "main_door", "position": {"x": 0.0, "y": 2.5, "z": 0.0}, "width": 1.0, "type": "door"}]
-            }
+        }
