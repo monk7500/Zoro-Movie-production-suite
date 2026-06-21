@@ -78,15 +78,23 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider,
 
         manifest["characters"][char_name] = char_manifest
 
-    # Add metadata to manifest
-    output_json = json.dumps(manifest, indent=2, ensure_ascii=False)
+    # ---- Metadata handling (CORRECTED) ----
+    # Compute content hash on the manifest WITHOUT _meta
+    manifest_without_meta = {
+        "characters": manifest["characters"]
+    }
+    content_hash = hashlib.sha256(
+        json.dumps(manifest_without_meta, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+
     manifest["_meta"] = {
         "agent": "VoicePerformanceAgent",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
+    output_json = json.dumps(manifest, indent=2, ensure_ascii=False)
     output_files["voice_manifest.json"] = output_json.encode("utf-8")
     return output_files
 
