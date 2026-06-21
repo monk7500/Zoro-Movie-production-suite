@@ -42,16 +42,21 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
     # 2. Validate and fill missing sections
     style = _validate_and_fill(style, genre_tone)
 
-    # 3. Add metadata
-    output_json = json.dumps(style, indent=2, ensure_ascii=False)
+    # 3. Compute content hash WITHOUT _meta
+    clean_data = {k: v for k, v in style.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
+    # 4. Add metadata
     style["_meta"] = {
         "agent": "StyleGuideCurator",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"style_guide.json": output_json.encode("utf-8")}
+    final_json = json.dumps(style, indent=2, ensure_ascii=False)
+    return {"style_guide.json": final_json.encode("utf-8")}
 
 
 # ---------------------------------------------------------------------------
@@ -92,16 +97,22 @@ Output ONLY valid JSON. No markdown."""
 
 
 def _extract_json(response: str) -> dict:
-    try: return json.loads(response)
-    except: pass
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        pass
     fence = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
     if fence:
-        try: return json.loads(fence.group(1))
-        except: pass
+        try:
+            return json.loads(fence.group(1))
+        except json.JSONDecodeError:
+            pass
     brace = re.search(r'\{[\s\S]*\}', response)
     if brace:
-        try: return json.loads(brace.group(0))
-        except: pass
+        try:
+            return json.loads(brace.group(0))
+        except json.JSONDecodeError:
+            pass
     return {}
 
 
