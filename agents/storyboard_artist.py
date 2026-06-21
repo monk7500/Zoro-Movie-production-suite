@@ -23,12 +23,21 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider,
     scenes = parsed_script.get("scenes", [])
     if not scenes:
         empty = {"shots": [], "total_shots": 0}
-        return {"storyboard_manifest.json": json.dumps(empty, indent=2).encode("utf-8")}
+        output_json = json.dumps(empty, indent=2).encode("utf-8")
+        content_hash = hashlib.sha256(output_json).hexdigest()
+        empty["_meta"] = {
+            "agent": "StoryboardArtist",
+            "bible_version": bible_version,
+            "content_hash": content_hash,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        final_json = json.dumps(empty, indent=2).encode("utf-8")
+        return {"storyboard_manifest.json": final_json}
 
-    # 1. Generate shot list via LLM
+    # ---- 1. Generate shot list via LLM ----
     shots = _generate_shot_list(scenes, tone, llm_provider)
 
-    # 2. Generate keyframes for each shot
+    # ---- 2. Generate keyframes for each shot ----
     output_files = {}
     style_mood = style_guide.get("color_palette", {}).get("mood", "cinematic")
     style_lighting = style_guide.get("lighting", {}).get("mood", "neutral lighting")
@@ -40,7 +49,7 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider,
         chars_in_frame = shot.get("characters_in_frame", [])
         location = shot.get("location", "")
 
-        # Build character description
+        # Build character description for the prompt
         char_desc_parts = []
         for name in chars_in_frame:
             char_vis = character_visuals.get(name, {})
@@ -82,6 +91,19 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider,
             shot["keyframe_description"] = _generate_shot_description(prompt, llm_provider)
 
         manifest["shots"].append(shot)
+
+    # ---- Metadata fix ----
+    clean_manifest = {"shots": manifest["shots"], "total_shots": manifest["total_shots"]}
+    content_hash = hashlib.sha256(
+        json.dumps(clean_manifest, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+
+    manifest["_meta"] = {
+        "agent": "StoryboardArtist",
+        "bible_version": bible_version,
+        "content_hash": content_hash,
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
     output_files["storyboard_manifest.json"] = json.dumps(manifest, indent=2).encode("utf-8")
     return output_files
