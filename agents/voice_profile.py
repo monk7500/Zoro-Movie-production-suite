@@ -16,7 +16,16 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
 
     if not characters:
         empty = {"characters": {}}
-        return {"voice_profiles.json": json.dumps(empty, indent=2).encode("utf-8")}
+        output_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+        empty["_meta"] = {
+            "agent": "VoiceProfileAgent",
+            "bible_version": bible_version,
+            "content_hash": content_hash,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        final_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        return {"voice_profiles.json": final_json.encode("utf-8")}
 
     # 1. Build character summaries with persona context
     char_summaries = _build_character_summaries(characters, personas)
@@ -40,16 +49,21 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
     # 3. Validate and fill
     profiles = _validate_and_fill(profiles, characters)
 
-    # 4. Add metadata
-    output_json = json.dumps(profiles, indent=2, ensure_ascii=False)
+    # 4. Compute content hash WITHOUT _meta
+    clean_data = {k: v for k, v in profiles.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
+    # 5. Add metadata
     profiles["_meta"] = {
         "agent": "VoiceProfileAgent",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"voice_profiles.json": output_json.encode("utf-8")}
+    final_json = json.dumps(profiles, indent=2, ensure_ascii=False)
+    return {"voice_profiles.json": final_json.encode("utf-8")}
 
 
 # ---------------------------------------------------------------------------
@@ -82,16 +96,22 @@ def _build_character_summaries(characters: List[dict], personas: dict) -> str:
 
 
 def _extract_json(response: str) -> dict:
-    try: return json.loads(response)
-    except: pass
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        pass
     fence = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
     if fence:
-        try: return json.loads(fence.group(1))
-        except: pass
+        try:
+            return json.loads(fence.group(1))
+        except json.JSONDecodeError:
+            pass
     brace = re.search(r'\{[\s\S]*\}', response)
     if brace:
-        try: return json.loads(brace.group(0))
-        except: pass
+        try:
+            return json.loads(brace.group(0))
+        except json.JSONDecodeError:
+            pass
     return {}
 
 
