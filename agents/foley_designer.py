@@ -89,16 +89,20 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider,
 
         manifest["scenes"][sid] = scene_sounds
 
-    # Add metadata
-    output_json = json.dumps(manifest, indent=2, ensure_ascii=False)
+    # ---- Metadata fix ----
+    clean_manifest = {"scenes": manifest["scenes"]}
+    content_hash = hashlib.sha256(
+        json.dumps(clean_manifest, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+
     manifest["_meta"] = {
         "agent": "FoleyDesignerAgent",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    output_files["foley_manifest.json"] = output_json.encode("utf-8")
+    output_files["foley_manifest.json"] = json.dumps(manifest, indent=2).encode("utf-8")
     return output_files
 
 
