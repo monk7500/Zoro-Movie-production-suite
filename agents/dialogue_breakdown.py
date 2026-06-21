@@ -4,9 +4,9 @@ Transforms the parsed script's dialogue into a structured, machine‑readable li
 with per‑character delivery instructions (emotion, intensity, pace, volume, context).
 """
 
-import json, re, hashlib
+import json, hashlib
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 
 def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[str, bytes]:
@@ -34,7 +34,6 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
             persona = personas.get(char_name, {})
             emotional_range = persona.get("emotional_range", ["neutral"])
 
-            # Synthesize delivery notes from tone + persona
             delivery = {
                 "emotion": primary_emotion if primary_emotion in emotional_range else (emotional_range[0] if emotional_range else "neutral"),
                 "intensity": scene_intensity,
@@ -53,7 +52,6 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
             }
             lines_out.append(line_out)
 
-            # Index per character
             if char_name not in char_index:
                 char_index[char_name] = {"total_lines": 0, "line_ids": []}
             char_index[char_name]["total_lines"] += 1
@@ -67,15 +65,20 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
 
     result = {"scenes": output_scenes, "characters": char_index}
 
-    output_json = json.dumps(result, indent=2, ensure_ascii=False)
+    # ---- Metadata fix ----
+    clean_data = {k: v for k, v in result.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
     result["_meta"] = {
         "agent": "DialogueBreakdownAgent",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"dialogue_breakdown.json": output_json.encode("utf-8")}
+    final_json = json.dumps(result, indent=2, ensure_ascii=False)
+    return {"dialogue_breakdown.json": final_json.encode("utf-8")}
 
 
 def _estimate_volume(emotion: str, intensity: float) -> str:
