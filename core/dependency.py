@@ -3,7 +3,8 @@ DataDependencyIndex – maps Bible paths to agents that depend on them.
 """
 
 import networkx as nx
-from typing import Dict, Set, List
+from typing import Dict, Set
+
 
 class DataDependencyIndex:
     def __init__(self, registry: dict, graph: nx.DiGraph):
