@@ -18,7 +18,16 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
 
     if not shots:
         empty = {"shots": {}}
-        return {"cinematography.json": json.dumps(empty, indent=2).encode("utf-8")}
+        output_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+        empty["_meta"] = {
+            "agent": "CinematographerAgent",
+            "bible_version": bible_version,
+            "content_hash": content_hash,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        final_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        return {"cinematography.json": final_json.encode("utf-8")}
 
     # 1. Build compact shot summaries
     shot_summaries = _build_shot_summaries(shots)
@@ -48,16 +57,21 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
     # 4. Validate and fill
     cine_data = _validate_and_fill(cine_data, shots, cam_defaults, light_defaults)
 
-    # 5. Add metadata
-    output_json = json.dumps(cine_data, indent=2, ensure_ascii=False)
+    # 5. Compute content hash WITHOUT _meta
+    clean_data = {k: v for k, v in cine_data.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
+    # 6. Add metadata
     cine_data["_meta"] = {
         "agent": "CinematographerAgent",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"cinematography.json": output_json.encode("utf-8")}
+    final_json = json.dumps(cine_data, indent=2, ensure_ascii=False)
+    return {"cinematography.json": final_json.encode("utf-8")}
 
 
 # ---------------------------------------------------------------------------
@@ -77,18 +91,18 @@ For each shot ID, provide an object with:
     "key_light": {
       "intensity": 1.0 is normal,
       "color_temp_k": 3200 or 5600,
-      "position": { "x": float, "y": float, "z": float } if estimable from geography
+      "position": { "x": float, "y": float, "z": float } if you can estimate from the scene geography
     },
     "fill_light": {
       "intensity": 0.0-1.0,
       "color_temp_k": 3200 or 5600
     },
-    "notes": any additional lighting notes
+    "notes": any additional lighting notes (e.g., "motivated by flickering neon sign")
   }
 
-Use global style defaults as baseline, but adapt each shot to the action and mood.
-For wide shots, use deeper focus (T5.6, focus_distance 10m). For close-ups, use shallow focus (T1.8, focus_distance 1.5m).
-Output ONLY valid JSON. Top key must be "shots"."""
+Use the global style defaults as a baseline, but adapt each shot to the action, mood, and geography.
+For static wide shots, use deeper focus (T5.6, focus_distance 10m). For close-ups, use shallow focus (T1.8, focus_distance 1.5m).
+Output ONLY a valid JSON object with top-level key "shots"."""
 
 
 def _build_shot_summaries(shots: List[dict]) -> str:
