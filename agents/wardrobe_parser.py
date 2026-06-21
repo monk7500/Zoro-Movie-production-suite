@@ -7,7 +7,7 @@ Character Continuity Agent, and Animation Agent.
 
 import json, re, hashlib
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 
 def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[str, bytes]:
@@ -19,12 +19,21 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
 
     if not scenes or not characters:
         empty = {"characters": {}}
-        return {"wardrobe_timeline.json": json.dumps(empty, indent=2).encode("utf-8")}
+        output_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+        empty["_meta"] = {
+            "agent": "WardrobePhysicalChangeParser",
+            "bible_version": bible_version,
+            "content_hash": content_hash,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        final_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        return {"wardrobe_timeline.json": final_json.encode("utf-8")}
 
-    # 1. Build a scene‑by‑scene action summary
+    # ---- 1. Build a scene‑by‑scene action summary ----
     script_summary = _build_script_summary(scenes, characters)
 
-    # 2. LLM‑based extraction
+    # ---- 2. LLM‑based extraction ----
     system_prompt = _build_system_prompt()
     user_prompt = f"Characters: {', '.join(c['name'] for c in characters)}\n\n{script_summary}"
 
@@ -39,19 +48,25 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
     except Exception:
         timeline = _fallback_timeline(scenes, characters)
 
-    # 3. Validate & enforce persistence rules
+    # ---- 3. Validate & enforce persistence rules ----
     timeline = _validate_and_enforce_persistence(timeline, scenes, characters)
 
-    # 4. Add metadata
-    output_json = json.dumps(timeline, indent=2, ensure_ascii=False)
+    # ---- 4. Compute content hash WITHOUT _meta ----
+    clean_data = {k: v for k, v in timeline.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
+    # ---- 5. Add metadata ----
     timeline["_meta"] = {
         "agent": "WardrobePhysicalChangeParser",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"wardrobe_timeline.json": output_json.encode("utf-8")}
+    # ---- 6. Serialize final output WITH metadata ----
+    final_json = json.dumps(timeline, indent=2, ensure_ascii=False)
+    return {"wardrobe_timeline.json": final_json.encode("utf-8")}
 
 
 # ---------------------------------------------------------------------------
@@ -148,10 +163,8 @@ def _validate_and_enforce_persistence(timeline: dict, scenes: List[dict], charac
             first_scene = next((c.get("first_appearance", "S01") for c in characters if c["name"] == name), scene_ids[0] if scene_ids else "S01")
             char_timeline = [_make_default_entry(first_scene)]
 
-        # Sort by scene order
         char_timeline.sort(key=lambda e: scene_ids.index(e["scene"]) if e["scene"] in scene_ids else 999)
 
-        # Fill missing scenes by carrying forward the previous state
         filled = []
         current_state = None
         for sid in scene_ids:
