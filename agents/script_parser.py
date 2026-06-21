@@ -1,21 +1,22 @@
 """
 Agent 1: Script Parser
-Converts raw screenplay text into structured JSON.
+Converts raw screenplay text (Fountain, plain text) into structured JSON.
+Extracts scenes, characters, dialogue, action lines, and ALL entities.
 """
 
 import json, re, hashlib
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 
 
 def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[str, bytes]:
     raw_script = input_slices.get("script_raw", "")
     mode = input_slices.get("mode", "cinematic")
 
-    # 1. Pre‑parse with regex (fast, always works)
+    # ---- 1. Pre‑parse with regex (fast, always works) ----
     pre_parsed = _pre_parse(raw_script)
 
-    # 2. LLM‑based full parse
+    # ---- 2. LLM‑based full parse ----
     system_prompt = _build_system_prompt()
     user_prompt = f"Screenplay:\n\n{raw_script}\n\nParse this screenplay into JSON as specified."
 
@@ -30,47 +31,76 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
     except Exception:
         parsed = pre_parsed   # fallback to regex parser
 
-    # 3. Validate and fill missing fields
+    # ---- 3. Validate and fill missing fields ----
     parsed = _validate_and_fill(parsed, pre_parsed)
 
-    # 4. Extract all entities if missing
+    # ---- 4. Extract all entities if missing ----
     if not parsed.get("entities"):
         parsed["entities"] = _extract_entities(parsed)
 
-    # 5. Enrich character descriptions from action lines
+    # ---- 5. Enrich character descriptions from action lines ----
     parsed["characters"] = _enrich_character_descriptions(parsed)
 
-    # 6. Add metadata
-    output_json = json.dumps(parsed, indent=2, ensure_ascii=False)
+    # ---- 6. Compute content hash WITHOUT _meta ----
+    clean_data = {k: v for k, v in parsed.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
+    # ---- 7. Add metadata ----
     parsed["_meta"] = {
         "agent": "ScriptParser",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"parsed_script.json": output_json.encode("utf-8")}
+    # ---- 8. Serialize final output WITH metadata ----
+    final_json = json.dumps(parsed, indent=2, ensure_ascii=False)
+    return {"parsed_script.json": final_json.encode("utf-8")}
 
 
+# ---------------------------------------------------------------------------
+# System prompt
 # ---------------------------------------------------------------------------
 def _build_system_prompt() -> str:
     return """You are a professional screenplay parser. Convert the given screenplay into a strict JSON structure.
 
 RULES:
-1. Identify all scenes (INT./EXT. headings). Scene IDs: S01, S02...
-2. For each scene extract:
-   - ALL action lines
-   - ALL dialogue blocks (character, parenthetical, line)
-   - characters_in_scene (from dialogue + action lines)
-   - mentioned_props (significant objects)
-3. Global character list: name, aliases, first_appearance, description_from_script (exact text, no invention).
-4. Global entity list: ALL tangible nouns (vehicles, animals, props, furniture, weapons, etc.).
-   Each entity: name, type, subtype, first_mentioned, context, attributes.
-5. Output ONLY valid JSON. Top keys: "title", "scenes", "characters", "entities", "props"."""
+1. Identify all scenes from their headings (INT./EXT., location, time of day). Scene IDs must be sequential: S01, S02, etc.
+2. For each scene, extract:
+   - ALL action lines (exactly as written)
+   - ALL dialogue blocks with: character name, parenthetical (if any), and line text
+   - characters_in_scene: list of character names who appear or are mentioned in action lines
+   - mentioned_props: any significant physical objects described in the scene
+3. Build a global character list ("characters") with:
+   - name: the character's name as it appears in dialogue headings
+   - aliases: other names used for the same character (e.g., "DR. JANE" = "JANE")
+   - first_appearance: the scene ID where they first appear
+   - description_from_script: any physical description found in action lines near their introduction (exact text). Do NOT invent descriptions.
+4. Build a global entity list ("entities") with ALL tangible nouns that are significant to the story or may appear on screen:
+   - name: a descriptive identifier (e.g., "coffee_mug", "getaway_car", "crow", "neon_sign")
+   - type: one of "vehicle", "animal", "machine", "prop", "furniture", "weapon", "clothing", "accessory", "food", "plant", "building_part"
+   - subtype: more specific (e.g., "car", "bird", "lamp") if clear
+   - first_mentioned: scene ID
+   - context: the action line or dialogue where it appears
+   - attributes: any described properties (color, material, condition, state) as key-value pairs
+5. Build a simple prop list ("props") for backward compatibility: name, first_mentioned, context.
+6. Output ONLY valid JSON. No markdown. No commentary.
+7. The JSON top-level keys must be: "title", "scenes", "characters", "entities", "props".
+8. If the script is in Fountain format, lines starting with '>' are center-aligned, '.' is forced scene heading — treat them appropriately.
+9. If a character's name is in ALL CAPS in action lines, they are being introduced — capture their description.
+10. Do not skip any scene, any line of dialogue, or any significant entity."""
 
 
+# ---------------------------------------------------------------------------
+# Pre‑parser (fallback when LLM is unavailable)
+# ---------------------------------------------------------------------------
 def _pre_parse(raw_script: str) -> dict:
-    scenes, characters, props, entities = [], {}, {}, []
+    scenes = []
+    characters = {}
+    entities = []
+    props = {}
+
     lines = raw_script.split("\n")
     current_scene = None
     scene_idx = 0
@@ -78,6 +108,7 @@ def _pre_parse(raw_script: str) -> dict:
     current_character = ""
     current_parenthetical = ""
     current_dialogue_lines = []
+
     scene_heading_re = re.compile(r'^(INT\.|EXT\.|INT/EXT\.|I/E\.)', re.IGNORECASE)
     character_re = re.compile(r'^[A-Z][A-Z\s\'\-]{1,30}$')
 
@@ -159,26 +190,48 @@ def _extract_time_of_day(heading: str) -> str:
     return m.group(1).upper() if m else "DAY"
 
 
+# ---------------------------------------------------------------------------
+# JSON extraction (handles LLM quirks)
+# ---------------------------------------------------------------------------
 def _extract_json(response: str) -> dict:
-    try: return json.loads(response)
-    except: pass
-    fence = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
-    if fence:
-        try: return json.loads(fence.group(1))
-        except: pass
-    brace = re.search(r'\{[\s\S]*\}', response)
-    if brace:
-        try: return json.loads(brace.group(0))
-        except: pass
-    return {}
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        pass
+    # Try markdown code fences
+    fence_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            pass
+    # Try finding the first { ... } block
+    brace_match = re.search(r'\{[\s\S]*\}', response)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group(0))
+        except json.JSONDecodeError:
+            pass
+    # If all fails, return empty skeleton
+    return {"title": "Untitled", "scenes": [], "characters": [], "entities": [], "props": []}
 
 
+# ---------------------------------------------------------------------------
+# Validation and gap‑filling
+# ---------------------------------------------------------------------------
 def _validate_and_fill(parsed: dict, fallback: dict) -> dict:
-    parsed.setdefault("title", fallback.get("title", "Untitled"))
-    parsed.setdefault("scenes", fallback.get("scenes", []))
-    parsed.setdefault("characters", fallback.get("characters", []))
-    parsed.setdefault("entities", fallback.get("entities", []))
-    parsed.setdefault("props", fallback.get("props", []))
+    if "title" not in parsed:
+        parsed["title"] = fallback.get("title", "Untitled")
+    if "scenes" not in parsed or not parsed["scenes"]:
+        parsed["scenes"] = fallback.get("scenes", [])
+    if "characters" not in parsed:
+        parsed["characters"] = fallback.get("characters", [])
+    if "entities" not in parsed:
+        parsed["entities"] = fallback.get("entities", [])
+    if "props" not in parsed:
+        parsed["props"] = fallback.get("props", [])
+
+    # Ensure every scene has required sub‑fields
     for scene in parsed["scenes"]:
         scene.setdefault("id", f"S{parsed['scenes'].index(scene)+1:02d}")
         scene.setdefault("heading", "")
@@ -189,47 +242,98 @@ def _validate_and_fill(parsed: dict, fallback: dict) -> dict:
         scene.setdefault("dialogue", [])
         scene.setdefault("characters_in_scene", [])
         scene.setdefault("mentioned_props", [])
+
+    # Build character list from dialogue if missing
+    if not parsed["characters"]:
+        all_chars = {}
+        for scene in parsed["scenes"]:
+            for d in scene.get("dialogue", []):
+                name = d.get("character", "")
+                if name and name not in all_chars:
+                    all_chars[name] = {
+                        "name": name,
+                        "aliases": [],
+                        "first_appearance": scene["id"],
+                        "description_from_script": None
+                    }
+        parsed["characters"] = list(all_chars.values())
+
     return parsed
 
 
+# ---------------------------------------------------------------------------
+# Entity extraction
+# ---------------------------------------------------------------------------
 def _extract_entities(parsed: dict) -> list:
-    entities, seen = [], set()
+    entities = []
+    seen = set()
+
+    # Entity patterns: common nouns that are likely props, vehicles, animals, etc.
     patterns = {
-        r'\b(car|truck|van|motorcycle|bus|train|ship|plane|helicopter|tank)\b': "vehicle",
-        r'\b(dog|cat|bird|crow|raven|horse|rat|snake|fish|wolf)\b': "animal",
-        r'\b(gun|pistol|rifle|knife|sword|revolver|shotgun|crossbow|grenade)\b': "weapon",
-        r'\b(phone|computer|laptop|tablet|drone|robot|holo(?:gram|display)?)\b': "machine",
-        r'\b(chair|table|desk|bed|couch|stool|counter|bar)\b': "furniture",
-        r'\b(bottle|glass|mug|cup|plate|bag|backpack|briefcase)\b': "prop",
-        r'\b(jacket|coat|hat|boot|glove|mask|helmet|dress|suit)\b': "clothing",
+        r'\b(car|truck|van|motorcycle|bus|train|ship|plane|helicopter|tank|jeep|suv|sedan|coupe|convertible)\b': "vehicle",
+        r'\b(dog|cat|bird|crow|raven|horse|rat|snake|fish|wolf|eagle|hawk|pigeon|sparrow)\b': "animal",
+        r'\b(gun|pistol|rifle|knife|sword|revolver|shotgun|crossbow|grenade|bomb|explosive)\b': "weapon",
+        r'\b(phone|computer|laptop|tablet|screen|monitor|keyboard|drone|robot|implant|holo(?:gram|graphic|display)?)\b': "machine",
+        r'\b(chair|table|desk|bed|couch|sofa|stool|counter|bar|shelf|dresser|cabinet)\b': "furniture",
+        r'\b(bottle|glass|mug|cup|plate|bowl|bag|backpack|briefcase|suitcase|box|crate)\b': "prop",
+        r'\b(jacket|coat|hat|boot|shoe|glove|scarf|mask|helmet|uniform|dress|suit)\b': "clothing",
     }
+
     for scene in parsed.get("scenes", []):
-        for line in scene.get("action_lines", []) + [d.get("line", "") for d in scene.get("dialogue", [])]:
-            for pat, etype in patterns.items():
-                for match in re.finditer(pat, line, re.IGNORECASE):
+        # Check action lines
+        for line in scene.get("action_lines", []):
+            for pattern, entity_type in patterns.items():
+                for match in re.finditer(pattern, line, re.IGNORECASE):
+                    name = match.group(1).lower()
+                    context = line
+                    if name not in seen:
+                        seen.add(name)
+                        entities.append({
+                            "name": name,
+                            "type": entity_type,
+                            "subtype": name,
+                            "first_mentioned": scene["id"],
+                            "context": context,
+                            "attributes": {}
+                        })
+        # Also check dialogue for mentioned objects
+        for d in scene.get("dialogue", []):
+            line = d.get("line", "")
+            for pattern, entity_type in patterns.items():
+                for match in re.finditer(pattern, line, re.IGNORECASE):
                     name = match.group(1).lower()
                     if name not in seen:
                         seen.add(name)
                         entities.append({
-                            "name": name, "type": etype, "subtype": name,
-                            "first_mentioned": scene["id"], "context": line,
+                            "name": name,
+                            "type": entity_type,
+                            "subtype": name,
+                            "first_mentioned": scene["id"],
+                            "context": line,
                             "attributes": {}
                         })
     return entities
 
 
+# ---------------------------------------------------------------------------
+# Character description enrichment
+# ---------------------------------------------------------------------------
 def _enrich_character_descriptions(parsed: dict) -> list:
     characters = parsed.get("characters", [])
     scenes = parsed.get("scenes", [])
+
     for char in characters:
         if char.get("description_from_script"):
             continue
         name = char["name"]
+        first_scene_id = char.get("first_appearance", "")
+
         for scene in scenes:
-            if scene["id"] == char.get("first_appearance", ""):
+            if scene["id"] == first_scene_id:
                 for line in scene.get("action_lines", []):
                     if re.search(rf'\b{re.escape(name)}\b', line, re.IGNORECASE):
                         char["description_from_script"] = line
                         break
                 break
+
     return characters
