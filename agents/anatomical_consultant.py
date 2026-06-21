@@ -28,7 +28,7 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider,
         if turnaround and vision_provider:
             issues.extend(_check_image_anatomy(turnaround, constraints, vision_provider))
         elif turnaround:
-            # Text-based fallback
+            # Text-based fallback using description file
             desc_file = char_data.get("base", {}).get("turnaround_description")
             if desc_file:
                 issues.extend(_check_text_anatomy(char_name, desc_file, constraints, llm_provider))
@@ -50,19 +50,25 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider,
         if issues:
             report["pass"] = False
 
-    output_json = json.dumps(report, indent=2, ensure_ascii=False)
+    # ---- Metadata fix ----
+    clean_data = {k: v for k, v in report.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
     report["_meta"] = {
         "agent": "AnatomicalConsultant",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"anatomy_report.json": output_json.encode("utf-8")}
+    final_json = json.dumps(report, indent=2, ensure_ascii=False)
+    return {"anatomy_report.json": final_json.encode("utf-8")}
 
 
 # ---------------------------------------------------------------------------
 def _determine_species(char_name: str, species_rules: dict) -> str:
+    """Check if a character matches a non‑human species from world rules."""
     for species_name in species_rules:
         if species_name.lower() in char_name.lower():
             return species_name
@@ -70,10 +76,11 @@ def _determine_species(char_name: str, species_rules: dict) -> str:
 
 
 def _get_species_constraints(species: str, species_rules: dict) -> dict:
+    """Return anatomical constraints for the given species."""
     default_human = {
         "limbs": {"arms": 2, "legs": 2, "fingers_per_hand": 5, "toes_per_foot": 5},
         "joint_limits": {
-            "shoulder_abduction": (0, 180),
+            "shoulder_abduction": (0, 180),  # degrees
             "elbow_flexion": (0, 145),
             "knee_flexion": (0, 135),
             "hip_abduction": (0, 45),
@@ -97,18 +104,19 @@ def _get_species_constraints(species: str, species_rules: dict) -> dict:
 
 
 def _check_image_anatomy(image_path: str, constraints: dict, vision_provider) -> List[dict]:
+    """Use a vision model to inspect an image for anatomical issues."""
     system_prompt = f"""Analyze this character image for anatomical errors. Expected anatomy:
 Limbs: {constraints.get('limbs', {})}
-Joint limits: {constraints.get('joint_limits', {})}
+Joint limits (in degrees): {constraints.get('joint_limits', {})}
 Proportions: {constraints.get('proportions', {})}
 
-List any anatomical issues. Each issue:
-- "body_part": affected part
-- "problem": short description
+List any anatomical issues. For each issue, provide:
+- "body_part": affected body part
+- "problem": short description (e.g., "extra digit", "impossible joint angle", "asymmetry")
 - "severity": "critical", "major", or "minor"
-- "detail": explanation
+- "detail": specific description
 
-If no issues, return [].
+If no issues, return an empty array [].
 Output ONLY a JSON array."""
     try:
         response = vision_provider.analyze(image_path, system_prompt)
@@ -118,17 +126,30 @@ Output ONLY a JSON array."""
 
 
 def _check_text_anatomy(char_name: str, desc_file: str, constraints: dict, llm_provider) -> List[dict]:
-    system_prompt = f"""Analyze this character description for anatomical errors. Expected anatomy:
+    """Use LLM to check a text description for anatomical plausibility."""
+    system_prompt = f"""You are an anatomical consultant. Analyze this character description for anatomical errors.
+The expected anatomy is:
 Limbs: {constraints.get('limbs', {})}
-Joint limits: {constraints.get('joint_limits', {})}
+Joint limits (in degrees): {constraints.get('joint_limits', {})}
 Proportions: {constraints.get('proportions', {})}
 
-Look for extra/missing limbs, impossible joint positions, asymmetry, disproportion.
-Output a JSON array of issues (empty if none)."""
+Look for:
+- Extra or missing limbs/digits
+- Impossible joint positions (e.g., arm bending backward at elbow)
+- Severe asymmetry
+- Disproportion (e.g., head too large or small for body)
+
+If issues are found, output a JSON array of:
+- "body_part": affected part
+- "problem": short description
+- "severity": "critical", "major", or "minor"
+- "detail": explanation
+
+If no issues, output an empty array [].
+Output ONLY a JSON array."""
     try:
-        # In a real implementation, load the description file content
         response = llm_provider.generate(
-            prompt=f"Character {char_name} description file: {desc_file}",
+            prompt=f"Character: {char_name}\nDescription file: {desc_file}",
             system=system_prompt,
             temperature=0.1
         )
