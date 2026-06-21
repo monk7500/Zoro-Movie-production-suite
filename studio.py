@@ -1,36 +1,67 @@
+"""
+AI Film Studio – Complete Gradio Dashboard
+Launch with: python studio.py
+"""
+
 import gradio as gr
-import json, threading, time, queue, os
+import json, threading, time, queue, os, sys
 from pathlib import Path
 from datetime import datetime
+from typing import Dict, Any, Optional
 
-# ========== GLOBAL STATE ==========
+# ---------- Core imports ----------
+from core.bible import FilmBible
+from core.cache import ContentCache
+from core.orchestrator import Orchestrator, AgentRunner
+from core.graph_builder import build_dependency_graph
+from agents.registry import build_registry
+
+# ---------- Provider imports ----------
+from providers.llm import OllamaProvider, OpenAICompatibleProvider
+from providers.tts import XTTSv2Provider, PiperProvider, ElevenLabsTTS, OpenAITTS
+from providers.image_gen import ComfyUIProvider
+from providers.render_engine import ComfyUIRenderProvider, BlenderRenderProvider
+from providers.physics import BlenderPhysicsProvider, SimplePhysicsProvider
+from providers.vfx import DiffusionVFXProvider
+from providers.music import MusicGenProvider
+from providers.audio_fx import AudioLDM2Provider
+from providers.assembly import FFmpegAssemblyProvider, TextFallbackAssemblyProvider
+
+# ---------- Global state ----------
 event_queue = queue.Queue()
 approval_event = threading.Event()
-approval_result = None
-orchestrator = None
-bible = None
-cache = None
+approval_result: Optional[dict] = None
+orchestrator: Optional[Orchestrator] = None
+bible: Optional[FilmBible] = None
+cache: Optional[ContentCache] = None
+llm_provider = None
+providers = {}
 
 class DashboardState:
     def __init__(self):
         self.phase = "idle"
         self.current_version = "v0001"
-        self.agent_status = {}
-        self.pending_approvals = []
-        self.pending_proposals = []
-        self.errors = []
+        self.agent_status: Dict[str, dict] = {}
+        self.pending_approvals: list = []
+        self.pending_proposals: list = []
+        self.errors: list = []
         self.running = False
 
 state = DashboardState()
 
-# ========== DUMMY PROVIDER (replace with real imports) ==========
-class OllamaProvider:
-    def __init__(self, model, url): self.model, self.url = model, url
-    def generate(self, prompt, system="", temperature=0.7, max_tokens=4096):
-        return f"Mock response for: {prompt[:50]}..."
-    def health_check(self): return True
+# ---------- DAG builder ----------
+def build_dag_json(agent_status, graph):
+    nodes, edges = [], []
+    for agent in graph.nodes():
+        info = agent_status.get(agent, {})
+        status = info.get("status", "pending")
+        color = {"pending":"gray","running":"blue","cached":"green","re-run":"yellow","failed":"red"}.get(status,"gray")
+        nodes.append({"id": agent, "label": agent, "color": color})
+    for u, v in graph.edges():
+        edges.append({"from": u, "to": v})
+    return json.dumps({"nodes": nodes, "edges": edges})
 
-# ========== BUILD UI ==========
+# ---------- UI ----------
 def build_ui():
     head_html = """
     <script src="https://unpkg.com/vis-network@9.1.2/dist/vis-network.min.js"></script>
@@ -60,7 +91,6 @@ def build_ui():
     """
 
     with gr.Blocks(head=head_html) as demo:
-        # Hidden fields
         dag_data_text = gr.Textbox(visible=False, elem_id="dag_data_text")
         clicked_agent_text = gr.Textbox(visible=False, elem_id="clicked-agent-input")
 
@@ -116,54 +146,74 @@ def build_ui():
                 test_llm_btn = gr.Button("Test Connection")
                 llm_status = gr.Textbox(label="LLM Status", interactive=False)
 
-        # Polling timer
+        # ---- Polling ----
         demo.load(
             fn=poll_updates,
             outputs=[phase_text, version_text, dag_data_text, agent_detail, approval_gallery, error_df, version_dropdown, bible_json_editor],
             every=1
         )
 
-        # Wire buttons
-        start_btn.click(
-            fn=start_production,
-            inputs=[provider_dd, model_txt, base_url_txt, api_key_txt],
-            outputs=[phase_text]
-        )
+        # ---- Events ----
+        start_btn.click(fn=start_production, inputs=[provider_dd, model_txt, base_url_txt, api_key_txt], outputs=[phase_text])
         dag_data_text.change(fn=None, js="(val) => initNetwork(val)", outputs=None)
         clicked_agent_text.change(fn=on_agent_click, inputs=clicked_agent_text, outputs=agent_detail)
         approve_btn.click(fn=handle_approval, inputs=[gr.State("approved"), revision_notes], outputs=approval_feedback)
         revise_btn.click(fn=handle_approval, inputs=[gr.State("revised"), revision_notes], outputs=approval_feedback)
         reject_btn.click(fn=handle_approval, inputs=[gr.State("rejected"), revision_notes], outputs=approval_feedback)
         test_llm_btn.click(fn=test_llm_connection, inputs=[provider_dd, model_txt, base_url_txt, api_key_txt], outputs=llm_status)
-        # Bible editing callbacks (simplified)
-        apply_btn.click(fn=apply_proposals, inputs=proposal_table, outputs=[bible_json_editor, proposal_table, version_dropdown])
-        rollback_btn.click(fn=rollback_version, inputs=version_dropdown, outputs=[bible_json_editor, version_dropdown])
-        interpret_btn.click(fn=on_interpret_prompt, inputs=[prompt_input], outputs=[interpreter_status, proposal_table])
 
     return demo
 
-# ========== CALLBACK FUNCTIONS ==========
+
+# ---------- Callbacks ----------
 def start_production(provider_name, model, base_url, api_key):
-    global llm_provider, state
+    global llm_provider, orchestrator, state, bible, cache, providers
+
+    # Build LLM provider
     if provider_name == "Ollama (local)":
         llm_provider = OllamaProvider(model, base_url)
+    else:
+        llm_provider = OpenAICompatibleProvider(model, base_url, api_key)
+
+    # Initialize Bible & Cache
+    bible = FilmBible(Path("./film_bible"))
+    cache = ContentCache(Path("./cache"))
+
+    # Build registry & graph
+    registry = build_registry("cinematic")
+    graph = build_dependency_graph("cinematic")
+
+    # Collect all available providers
+    providers = {
+        "llm": llm_provider,
+        "tts": XTTSv2Provider(),
+        "image": ComfyUIProvider(),
+        "render_engine": ComfyUIRenderProvider(),
+        "physics": SimplePhysicsProvider(),
+        "vfx": DiffusionVFXProvider(),
+        "music": MusicGenProvider(),
+        "audio_fx": AudioLDM2Provider(),
+        "assembly": TextFallbackAssemblyProvider(),  # safe default
+    }
+
+    orchestrator = Orchestrator(
+        bible=bible, cache=cache, registry=registry, graph=graph,
+        mode="cinematic", llm_provider=llm_provider, providers=providers,
+        event_callback=lambda e, d: event_queue.put((e, d)),
+        approval_callback=_request_approval,
+    )
+
     state.running = True
-    state.phase = "Starting..."
-    return state.phase
+    threading.Thread(target=orchestrator.produce_film, args=("script.fountain",), daemon=True).start()
+    return "Production started"
 
-def poll_updates():
-    while not event_queue.empty():
-        ev_type, data = event_queue.get_nowait()
-        if ev_type == "phase_changed":
-            state.phase = data["phase"]
-        elif ev_type == "bible_version":
-            state.current_version = data["version"]
-    dag_json = json.dumps({"nodes":[{"id":"Script Parser","label":"Script Parser","color":"blue"}],"edges":[]})
-    versions = ["v0001"]
-    return (state.phase, state.current_version, dag_json, "<p>Click a node</p>", [], [], versions, {})
 
-def on_agent_click(agent_name):
-    return f"<h3>{agent_name}</h3><p>Status: idle</p>"
+def _request_approval(agent_name, assets):
+    state.pending_approvals = [{"agent": agent_name, "assets": assets}]
+    approval_event.clear()
+    approval_event.wait()
+    return approval_result
+
 
 def handle_approval(action_state, notes):
     global approval_result
@@ -172,27 +222,47 @@ def handle_approval(action_state, notes):
     state.pending_approvals = []
     return "ok"
 
+
+def poll_updates():
+    while not event_queue.empty():
+        ev_type, data = event_queue.get_nowait()
+        if ev_type == "phase_changed":
+            state.phase = data["phase"]
+        elif ev_type == "agent_started":
+            state.agent_status[data["agent_name"]] = {"status": "running"}
+        elif ev_type == "agent_completed":
+            state.agent_status[data["agent_name"]] = {"status": "cached" if data.get("cached") else "re-run"}
+        elif ev_type == "bible_version":
+            state.current_version = data["version"]
+
+    graph = orchestrator.graph if orchestrator else build_dependency_graph("cinematic")
+    dag_json = build_dag_json(state.agent_status, graph)
+    gallery_imgs = state.pending_approvals[0].get("assets", []) if state.pending_approvals else []
+    error_rows = [[e.get("shot_id",""), e.get("symptom",""), e.get("severity",""), e.get("asset_id","")] for e in state.errors]
+    versions = bible.list_versions() if bible else ["v0001"]
+    bible_data = bible.read(state.current_version) if bible else {}
+
+    return (state.phase, state.current_version, dag_json, "<p>Click a node</p>", gallery_imgs, error_rows, versions, bible_data)
+
+
+def on_agent_click(agent_name):
+    info = state.agent_status.get(agent_name, {})
+    return f"<h3>{agent_name}</h3><p>Status: {info.get('status', 'unknown')}</p>"
+
+
 def test_llm_connection(provider_name, model, url, api_key):
     try:
         if provider_name == "Ollama (local)":
             prov = OllamaProvider(model, url)
         else:
-            prov = OllamaProvider(model, url)  # simplified
+            prov = OpenAICompatibleProvider(model, url, api_key)
         ok = prov.health_check()
         return "✅ Connected" if ok else "❌ Failed"
     except Exception as e:
         return f"❌ {e}"
 
-def apply_proposals(selected_rows):
-    return {}, [], gr.update(choices=["v0001"])
 
-def rollback_version(version):
-    return {}, gr.update(choices=["v0001"])
-
-def on_interpret_prompt(prompt):
-    return "Interpretation complete.", []
-
-# ========== LAUNCH ==========
+# ---------- Launch ----------
 if __name__ == "__main__":
     demo = build_ui()
     demo.launch(server_name="0.0.0.0", server_port=7860)
