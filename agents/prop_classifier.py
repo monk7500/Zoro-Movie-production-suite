@@ -7,7 +7,7 @@ Directly seeds the Dynamic Prop Tracker and the Prop Continuity Validator.
 
 import json, re, hashlib
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 
 def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[str, bytes]:
@@ -17,7 +17,16 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
 
     if not prop_catalog:
         empty = {"props": {}}
-        return {"prop_classification.json": json.dumps(empty, indent=2).encode("utf-8")}
+        output_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+        empty["_meta"] = {
+            "agent": "PropClassifierAgent",
+            "bible_version": bible_version,
+            "content_hash": content_hash,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        final_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        return {"prop_classification.json": final_json.encode("utf-8")}
 
     # 1. Build a summary of each prop with tentative classification and context
     prop_summaries = _build_prop_summaries(prop_catalog, geography)
@@ -40,16 +49,21 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
     # 3. Validate and fill
     classification = _validate_and_fill(classification, prop_catalog, geography)
 
-    # 4. Add metadata
-    output_json = json.dumps(classification, indent=2, ensure_ascii=False)
+    # 4. Compute content hash WITHOUT _meta
+    clean_data = {k: v for k, v in classification.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
+    # 5. Add metadata
     classification["_meta"] = {
         "agent": "PropClassifierAgent",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"prop_classification.json": output_json.encode("utf-8")}
+    final_json = json.dumps(classification, indent=2, ensure_ascii=False)
+    return {"prop_classification.json": final_json.encode("utf-8")}
 
 
 # ---------------------------------------------------------------------------
@@ -92,16 +106,22 @@ def _build_prop_summaries(prop_catalog: dict, geography: dict) -> str:
 
 
 def _extract_json(response: str) -> dict:
-    try: return json.loads(response)
-    except: pass
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        pass
     fence = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
     if fence:
-        try: return json.loads(fence.group(1))
-        except: pass
+        try:
+            return json.loads(fence.group(1))
+        except json.JSONDecodeError:
+            pass
     brace = re.search(r'\{[\s\S]*\}', response)
     if brace:
-        try: return json.loads(brace.group(0))
-        except: pass
+        try:
+            return json.loads(brace.group(0))
+        except json.JSONDecodeError:
+            pass
     return {}
 
 
