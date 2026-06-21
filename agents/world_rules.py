@@ -16,10 +16,10 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
 
     scenes = parsed_script.get("scenes", [])
 
-    # 1. Extract rule‑like snippets from the script
+    # ---- 1. Extract rule‑like snippets from the script ----
     rule_snippets = _extract_rule_snippets(scenes)
 
-    # 2. LLM‑based rule extraction
+    # ---- 2. LLM‑based rule extraction ----
     system_prompt = _build_system_prompt()
     user_prompt = f"Script rule‑like excerpts:\n{rule_snippets}\n\nWorld guide (creator notes):\n{world_guide}"
 
@@ -34,19 +34,24 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
     except Exception:
         rules = _fallback_rules()
 
-    # 3. Validate and fill
+    # ---- 3. Validate and fill ----
     rules = _validate_and_fill(rules)
 
-    # 4. Add metadata
-    output_json = json.dumps(rules, indent=2, ensure_ascii=False)
+    # ---- 4. Compute content hash WITHOUT _meta ----
+    clean_data = {k: v for k, v in rules.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
+    # ---- 5. Add metadata ----
     rules["_meta"] = {
         "agent": "WorldRulesAgent",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"world_rules.json": output_json.encode("utf-8")}
+    final_json = json.dumps(rules, indent=2, ensure_ascii=False)
+    return {"world_rules.json": final_json.encode("utf-8")}
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +68,7 @@ Organize the rules into a JSON object with domain‑specific sections. Choose do
 - "communication": { "method": "...", "range": "planetary"|"local" }
 - "health_medicine": { "level": "modern"|"advanced"|"magical"|"primitive", "notes": "..." }
 
-There is NO fixed list of domains — create whatever is relevant. If not addressed, omit or mark "unknown".
+There is NO fixed list of domains — create whatever is relevant to the story. If a domain is not addressed, omit or mark as "unknown".
 Do NOT invent rules that contradict the script. Output ONLY valid JSON."""
 
 
@@ -92,16 +97,22 @@ def _extract_rule_snippets(scenes: List[dict]) -> str:
 
 
 def _extract_json(response: str) -> dict:
-    try: return json.loads(response)
-    except: pass
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        pass
     fence = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
     if fence:
-        try: return json.loads(fence.group(1))
-        except: pass
+        try:
+            return json.loads(fence.group(1))
+        except json.JSONDecodeError:
+            pass
     brace = re.search(r'\{[\s\S]*\}', response)
     if brace:
-        try: return json.loads(brace.group(0))
-        except: pass
+        try:
+            return json.loads(brace.group(0))
+        except json.JSONDecodeError:
+            pass
     return {}
 
 
