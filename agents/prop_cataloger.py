@@ -22,7 +22,16 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
 
     if not all_items:
         empty = {"props": {}}
-        return {"prop_catalog.json": json.dumps(empty, indent=2).encode("utf-8")}
+        output_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+        empty["_meta"] = {
+            "agent": "PropSetDressingCataloger",
+            "bible_version": bible_version,
+            "content_hash": content_hash,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        final_json = json.dumps(empty, indent=2, ensure_ascii=False)
+        return {"prop_catalog.json": final_json.encode("utf-8")}
 
     # 2. Build a summary for the LLM
     item_summaries = _build_item_summaries(all_items)
@@ -45,16 +54,21 @@ def run(input_slices: Dict[str, Any], bible_version: str, llm_provider) -> Dict[
     # 4. Validate and fill missing items
     catalog = _validate_and_fill(catalog, all_items, locations)
 
-    # 5. Add metadata
-    output_json = json.dumps(catalog, indent=2, ensure_ascii=False)
+    # 5. Compute content hash WITHOUT _meta
+    clean_data = {k: v for k, v in catalog.items() if k != "_meta"}
+    output_json = json.dumps(clean_data, indent=2, ensure_ascii=False)
+    content_hash = hashlib.sha256(output_json.encode()).hexdigest()
+
+    # 6. Add metadata
     catalog["_meta"] = {
         "agent": "PropSetDressingCataloger",
         "bible_version": bible_version,
-        "content_hash": hashlib.sha256(output_json.encode()).hexdigest(),
+        "content_hash": content_hash,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    return {"prop_catalog.json": output_json.encode("utf-8")}
+    final_json = json.dumps(catalog, indent=2, ensure_ascii=False)
+    return {"prop_catalog.json": final_json.encode("utf-8")}
 
 
 # ---------------------------------------------------------------------------
@@ -118,16 +132,22 @@ def _build_item_summaries(all_items: List[dict]) -> str:
 
 
 def _extract_json(response: str) -> dict:
-    try: return json.loads(response)
-    except: pass
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        pass
     fence = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
     if fence:
-        try: return json.loads(fence.group(1))
-        except: pass
+        try:
+            return json.loads(fence.group(1))
+        except json.JSONDecodeError:
+            pass
     brace = re.search(r'\{[\s\S]*\}', response)
     if brace:
-        try: return json.loads(brace.group(0))
-        except: pass
+        try:
+            return json.loads(brace.group(0))
+        except json.JSONDecodeError:
+            pass
     return {}
 
 
@@ -171,7 +191,6 @@ def _validate_and_fill(catalog: dict, all_items: List[dict], locations: dict) ->
             if not catalog["props"][name].get("visual_reference"):
                 catalog["props"][name]["visual_reference"] = f"props/{name}_ref.png"
         if not catalog["props"][name].get("location_typical"):
-            # Try to infer from context or first mentioned scene
             scene_id = item.get("first_mentioned", "")
             catalog["props"][name]["location_typical"] = "unknown"
     return catalog
