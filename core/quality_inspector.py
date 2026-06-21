@@ -10,5 +10,16 @@ class QualityInspector:
         fix_plan = []
         for err in errors:
             root = self.decider.find_root_cause_agent(err)
-            fix_plan.append({"error_id": err.get("error_id"), "root_agent": root})
-        return {"fix_plan": fix_plan, "total_fixes": len(fix_plan)}
+            instruction = self.decider.generate_fix_instruction(err)
+            fix_plan.append({
+                "error_id": err.get("error_id"),
+                "root_agent": root,
+                "fix_instruction": instruction,
+                "severity": err.get("severity", "major"),
+                "shot_id": err.get("shot_id", ""),
+            })
+        return {
+            "fix_plan": fix_plan,
+            "total_fixes": len(fix_plan),
+            "auto_fix": True,
+        }
